@@ -46,10 +46,21 @@ export function buildThreadText(messages: any[]): TruncatedThread {
     const from = message?.from?.[0]?.email || message?.from?.[0]?.name || 'unknown sender';
     const date = message?.date ? new Date(message.date).toISOString() : '';
     const bodyText = stripHtml(getMessageBodyHtml(message));
-    const block = `From: ${from}${date ? `  Date: ${date}` : ''}\n${bodyText}`;
+    const header = `From: ${from}${date ? `  Date: ${date}` : ''}\n`;
+    const block = header + bodyText;
 
     if (totalChars + block.length > MAX_CHARS) {
       charTruncated = true;
+      const remaining = MAX_CHARS - totalChars;
+      const marker = '\n\n[message truncated]';
+
+      // Always retain part of an oversized newest message. Previously the
+      // loop broke before adding anything, causing long single-message
+      // threads to be reported as unreadable.
+      if (remaining > header.length + marker.length) {
+        const bodyBudget = remaining - header.length - marker.length;
+        parts.unshift(header + bodyText.slice(0, bodyBudget).trimEnd() + marker);
+      }
       break;
     }
     parts.unshift(block);

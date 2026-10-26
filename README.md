@@ -59,6 +59,7 @@ Configure any one of the following in Preferences:
 - **OpenAI** — e.g. `gpt-4o-mini`, `gpt-4o`
 - **Anthropic** — e.g. `claude-3-5-haiku-20241022`, or the current Claude model of your choice
 - **OpenRouter** — a single API key gives you access to a huge range of models via `provider/model` slugs, e.g. `openai/gpt-4o-mini`, `anthropic/claude-3.5-haiku`, `deepseek/deepseek-v4-pro-0813`. Check [openrouter.ai/models](https://openrouter.ai/models) or `GET https://openrouter.ai/api/v1/models` for the current list — model names change over time.
+- **Any OpenAI-compatible endpoint** — configure a base URL, model, and optional API key for local servers such as llama.cpp, Ollama, or LM Studio.
 
 ## Installation
 
@@ -88,6 +89,8 @@ Fully quit and relaunch Mailspring — plugins don't hot-reload.
 1. Open Mailspring's Preferences.
 2. Open the **Mailspring AI Copilot** tab.
 3. Pick a provider, paste in your API key, and set a model (sensible defaults are pre-filled).
+
+For an OpenAI-compatible provider, set the base URL through `/v1` (for example `http://localhost:8080/v1` for llama.cpp). The API key is optional for local servers that do not require authentication.
 
 Your key never leaves your machine except in direct API calls to the provider you picked.
 

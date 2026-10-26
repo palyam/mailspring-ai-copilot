@@ -13,13 +13,30 @@ const DEFAULT_MODELS: Record<string, string> = {
   openai: 'gpt-4o-mini',
   anthropic: 'claude-3-5-haiku-20241022',
   openrouter: 'openai/gpt-4o-mini',
+  'openai-compatible': 'local-model',
+};
+
+// Approximate size of the right-click menu, used to keep it inside the window.
+const MENU_WIDTH = 150;
+const MENU_HEIGHT = 64;
+
+// Mirrors Mailspring's own `isTextInput` (app/src/window-event-handler.ts): the
+// app routes mod+A to the focused text field and to "select all threads"
+// otherwise, so we must leave fields that caret-navigate alone.
+const INPUT_TYPES = ['text', 'email', 'url', '', 'search', 'password', 'number'];
+const isTextInput = (node: EventTarget | null): boolean => {
+  if (!(node instanceof HTMLElement)) return false;
+  if (node.tagName === 'TEXTAREA') return true;
+  if (node.tagName === 'INPUT') return INPUT_TYPES.includes((node as HTMLInputElement).type);
+  return !!node.closest('[contenteditable]');
 };
 
 function getConfiguredLLM() {
   const provider = AppEnv.config.get('ai-thread-sidebar.provider') || 'openai';
   const apiKey = AppEnv.config.get('ai-thread-sidebar.apiKey') || '';
   const model = AppEnv.config.get('ai-thread-sidebar.model') || DEFAULT_MODELS[provider];
-  return { provider, apiKey, model };
+  const baseUrl = AppEnv.config.get('ai-thread-sidebar.baseUrl') || '';
+  return { provider, apiKey, model, baseUrl };
 }
 
 type Status = 'idle' | 'loading' | 'success' | 'error';
@@ -34,12 +51,16 @@ interface State {
   replyInput: string;
   replyStatus: Status;
   replyError: string;
+
+  contextMenu: { x: number; y: number; text: string; canSelectAll: boolean } | null;
 }
 
 export default class AISidebarPanel extends React.Component<{}, State> {
   static displayName = 'AISidebarPanel';
 
   _unsubscribes: Array<() => void> = [];
+  _menuListenersAttached = false;
+  _panelEl: HTMLDivElement | null = null;
 
   constructor(props: {}) {
     super(props);
@@ -53,6 +74,8 @@ export default class AISidebarPanel extends React.Component<{}, State> {
       replyInput: '',
       replyStatus: 'idle',
       replyError: '',
+
+      contextMenu: null,
     };
   }
 
@@ -62,6 +85,7 @@ export default class AISidebarPanel extends React.Component<{}, State> {
 
   componentWillUnmount() {
     this._unsubscribes.forEach(unsub => unsub());
+    this._detachMenuListeners();
   }
 
   _currentThreadId(): string | null {
@@ -82,7 +106,9 @@ export default class AISidebarPanel extends React.Component<{}, State> {
         replyInput: '',
         replyStatus: 'idle',
         replyError: '',
+        contextMenu: null,
       });
+      this._detachMenuListeners();
     }
   };
 
@@ -90,7 +116,7 @@ export default class AISidebarPanel extends React.Component<{}, State> {
     this.setState({ status: 'loading', error: '', summary: '' });
 
     try {
-      const { provider, apiKey, model } = getConfiguredLLM();
+      const { provider, apiKey, model, baseUrl } = getConfiguredLLM();
 
       const messages = MessageStore.items() || [];
       if (messages.length === 0) {
@@ -102,7 +128,7 @@ export default class AISidebarPanel extends React.Component<{}, State> {
         throw new Error('Could not read any message content from this thread.');
       }
 
-      const summary = await summarizeThread({ provider, apiKey, model, threadText: text });
+      const summary = await summarizeThread({ provider, apiKey, model, threadText: text, baseUrl });
 
       if (this._currentThreadId() !== this.state.threadId) {
         // Thread changed while the request was in flight; discard the result.
@@ -124,7 +150,7 @@ export default class AISidebarPanel extends React.Component<{}, State> {
     this.setState({ replyStatus: 'loading', replyError: '' });
 
     try {
-      const { provider, apiKey, model } = getConfiguredLLM();
+      const { provider, apiKey, model, baseUrl } = getConfiguredLLM();
 
       const thread = FocusedContentStore.focused('thread');
       const messages = MessageStore.items() || [];
@@ -142,6 +168,7 @@ export default class AISidebarPanel extends React.Component<{}, State> {
         provider,
         apiKey,
         model,
+        baseUrl,
         threadText,
         userInput: this.state.replyInput,
       });
@@ -163,13 +190,151 @@ export default class AISidebarPanel extends React.Component<{}, State> {
     }
   };
 
+  // Mailspring binds mod+A to `core:select-all`, which selects every thread in
+  // the list unless the event target is a text input. Claim it while focus is
+  // inside the panel so mod+A behaves like "select the summary text".
+  _onPanelKeyDownCapture = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+    if (String(event.key).toLowerCase() !== 'a') return;
+    if (isTextInput(event.target)) return; // the reply textarea keeps its own mod+A
+
+    event.preventDefault();
+    event.stopPropagation();
+    this._selectSummary();
+  };
+
+  _selectSummary() {
+    const summary = this._panelEl && this._panelEl.querySelector('.ai-thread-sidebar-summary');
+    const selection = window.getSelection();
+    if (!summary || !selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(summary);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  _summarySelectionText = (panel: HTMLElement): string => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return '';
+    const { anchorNode, focusNode } = selection;
+    if (!anchorNode || !focusNode) return '';
+    if (!panel.contains(anchorNode) || !panel.contains(focusNode)) return '';
+    return selection.toString();
+  };
+
+  _onPanelContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    // Editable fields keep Mailspring's own native menu, and right-clicking the
+    // menu itself must not re-open it.
+    if (isTextInput(target) || target.closest('.ai-thread-sidebar-context-menu')) return;
+
+    event.preventDefault();
+    const panel = event.currentTarget;
+    this.setState({
+      contextMenu: {
+        x: Math.min(event.clientX, window.innerWidth - MENU_WIDTH),
+        y: Math.min(event.clientY, window.innerHeight - MENU_HEIGHT),
+        text: this._summarySelectionText(panel),
+        canSelectAll: !!(this._panelEl && this._panelEl.querySelector('.ai-thread-sidebar-summary')),
+      },
+    });
+    this._attachMenuListeners();
+  };
+
+  _onContextMenuSelectAll = () => {
+    this._selectSummary();
+    this._closeContextMenu();
+  };
+
+  _closeContextMenu = () => {
+    if (!this.state.contextMenu) return;
+    this.setState({ contextMenu: null });
+    this._detachMenuListeners();
+  };
+
+  _onDocumentMouseDown = (event: MouseEvent) => {
+    const target = event.target as HTMLElement;
+    if (target && target.closest && target.closest('.ai-thread-sidebar-context-menu')) return;
+    this._closeContextMenu();
+  };
+
+  _onMenuKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape' || !this.state.contextMenu) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this._closeContextMenu();
+  };
+
+  _onContextMenuCopy = () => {
+    // Mailspring's own `core:copy` uses execCommand on the main document and
+    // falls back to the window's editing command (app/src/window-event-handler.ts).
+    if (!document.execCommand('copy')) {
+      try {
+        AppEnv.getCurrentWindow().webContents.copy();
+      } catch (err) {
+        // Neither path worked; nothing else to fall back to.
+      }
+    }
+    this._closeContextMenu();
+  };
+
+  _attachMenuListeners() {
+    if (this._menuListenersAttached) return;
+    this._menuListenersAttached = true;
+    document.addEventListener('mousedown', this._onDocumentMouseDown, true);
+    document.addEventListener('keydown', this._onMenuKeyDown, true);
+    window.addEventListener('scroll', this._closeContextMenu, true);
+    window.addEventListener('blur', this._closeContextMenu);
+  }
+
+  _detachMenuListeners() {
+    if (!this._menuListenersAttached) return;
+    this._menuListenersAttached = false;
+    document.removeEventListener('mousedown', this._onDocumentMouseDown, true);
+    document.removeEventListener('keydown', this._onMenuKeyDown, true);
+    window.removeEventListener('scroll', this._closeContextMenu, true);
+    window.removeEventListener('blur', this._closeContextMenu);
+  }
+
+  _renderContextMenu() {
+    const menu = this.state.contextMenu;
+    if (!menu) return null;
+    return (
+      <div
+        className="ai-thread-sidebar-context-menu"
+        style={{ left: menu.x, top: menu.y }}
+        role="menu"
+      >
+        <button
+          type="button"
+          className="ai-thread-sidebar-context-menu-item"
+          role="menuitem"
+          disabled={menu.text.length === 0}
+          onClick={this._onContextMenuCopy}
+        >
+          Copy
+        </button>
+        <div className="ai-thread-sidebar-context-menu-divider" />
+        <button
+          type="button"
+          className="ai-thread-sidebar-context-menu-item"
+          role="menuitem"
+          disabled={!menu.canSelectAll}
+          onClick={this._onContextMenuSelectAll}
+        >
+          Select all
+        </button>
+      </div>
+    );
+  }
+
   _renderBullets(summary: string) {
     const lines = summary
       .split('\n')
       .map(line => line.replace(/^[-*•]\s*/, '').trim())
       .filter(Boolean);
     return (
-      <ul className="ai-thread-sidebar-summary">
+      <ul className="ai-thread-sidebar-summary" tabIndex={0}>
         {lines.map((line, i) => (
           <li key={i}>{line}</li>
         ))}
@@ -185,7 +350,14 @@ export default class AISidebarPanel extends React.Component<{}, State> {
     }
 
     return (
-      <div className="ai-thread-sidebar-panel">
+      <div
+        className="ai-thread-sidebar-panel"
+        ref={el => {
+          this._panelEl = el;
+        }}
+        onKeyDownCapture={this._onPanelKeyDownCapture}
+        onContextMenu={this._onPanelContextMenu}
+      >
         <div className="ai-thread-sidebar-header">AI Summary</div>
 
         <button
@@ -241,6 +413,8 @@ export default class AISidebarPanel extends React.Component<{}, State> {
         {replyStatus === 'success' && (
           <div className="ai-thread-sidebar-notice">Draft created — opening in composer.</div>
         )}
+
+        {this._renderContextMenu()}
       </div>
     );
   }

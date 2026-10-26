@@ -1,3 +1,5 @@
+@import 'ui-variables';
+
 .ai-thread-sidebar-panel {
   padding: 10px;
 }
@@ -21,6 +23,16 @@
   white-space: pre-wrap;
 }
 
+// Mailspring sets `body { user-select: none }` (static/style/selection.less),
+// so static plugin text is unselectable unless it opts back in like the
+// app's own `.selectable` class does.
+.ai-thread-sidebar-summary,
+.ai-thread-sidebar-notice,
+.ai-thread-sidebar-error {
+  cursor: text;
+  user-select: text;
+}
+
 .ai-thread-sidebar-summary {
   margin: 0;
   padding-left: 18px;
@@ -36,6 +48,42 @@
   margin-top: 6px;
 }
 
+.ai-thread-sidebar-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 120px;
+  padding: 4px 0;
+  background: @background-primary;
+  border: 1px solid @border-color-primary;
+  border-radius: @border-radius-base;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.ai-thread-sidebar-context-menu-divider {
+  border-top: 1px solid @border-color-primary;
+  margin: 4px 0;
+}
+
+.ai-thread-sidebar-context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 4px 12px;
+  border: 0;
+  background: transparent;
+  color: @text-color;
+  font-size: @font-size-base;
+  text-align: left;
+  cursor: default;
+
+  &:hover:not(:disabled) {
+    background: @background-secondary;
+  }
+
+  &:disabled {
+    color: @text-color-subtle;
+  }
+}
+
 .ai-thread-sidebar-divider {
   border-top: 1px solid #ddd;
   margin: 14px 0;
@@ -46,6 +94,13 @@
   box-sizing: border-box;
   margin-bottom: 8px;
   resize: vertical;
+  color: @text-color;
+  background-color: @background-primary;
+  border: 1px solid @input-border-color;
+
+  &::placeholder {
+    color: @text-color-subtle;
+  }
 }
 
 .ai-thread-sidebar-preferences {

@@ -1,10 +1,11 @@
-export type Provider = 'openai' | 'anthropic' | 'openrouter';
+export type Provider = 'openai' | 'anthropic' | 'openrouter' | 'openai-compatible';
 
 export interface CallParams {
   provider: Provider;
   apiKey: string;
   model: string;
   prompt: string;
+  baseUrl?: string;
 }
 
 export interface SummarizeParams {
@@ -12,6 +13,7 @@ export interface SummarizeParams {
   apiKey: string;
   model: string;
   threadText: string; // already stripped/truncated plain text
+  baseUrl?: string;
 }
 
 export interface ComposeReplyParams {
@@ -20,23 +22,25 @@ export interface ComposeReplyParams {
   model: string;
   threadText: string; // already stripped/truncated plain text
   userInput: string; // the user's rough notes on what they want to say
+  baseUrl?: string;
 }
 
 const SUMMARIZE_PROMPT_PREFIX = `Summarize the following email thread in 3-6 short bullet points.
 Focus on: key points discussed, any decisions made, and any open
 action items or unanswered questions. Be terse — this is for someone
 who has already read the thread and wants a quick refresher.
+Write the summary in the predominant language of the email thread.
 
 THREAD:
 `;
 
 export async function summarizeThread(params: SummarizeParams): Promise<string> {
-  const { provider, apiKey, model, threadText } = params;
-  return callLLM({ provider, apiKey, model, prompt: SUMMARIZE_PROMPT_PREFIX + threadText });
+  const { provider, apiKey, model, threadText, baseUrl } = params;
+  return callLLM({ provider, apiKey, model, prompt: SUMMARIZE_PROMPT_PREFIX + threadText, baseUrl });
 }
 
 export async function composeReply(params: ComposeReplyParams): Promise<string> {
-  const { provider, apiKey, model, threadText, userInput } = params;
+  const { provider, apiKey, model, threadText, userInput, baseUrl } = params;
   const prompt = `You are drafting a reply to the email thread below, on behalf of the
 person who received it. Use the thread for context (who's involved, what's
 been discussed, any open questions) so the reply makes sense as a follow-up.
@@ -45,6 +49,10 @@ The person wants to say the following (their rough notes, possibly informal
 or incomplete — rephrase and expand this into a polished, appropriately
 toned reply body, but keep their intent and key points; don't invent new
 facts, commitments, or details that weren't in their notes or the thread):
+
+Write the reply in the same language as the user's notes. If the notes
+are too short or language-neutral to determine that, use the predominant
+language of the email thread.
 
 USER'S NOTES:
 ${userInput}
@@ -56,12 +64,12 @@ Write ONLY the body text of the reply email. No subject line, no
 "Here's a draft" preamble, no explanation — just the reply text itself,
 ready to send.`;
 
-  return callLLM({ provider, apiKey, model, prompt });
+  return callLLM({ provider, apiKey, model, prompt, baseUrl });
 }
 
 export async function callLLM(params: CallParams): Promise<string> {
-  const { provider, apiKey, model, prompt } = params;
-  if (!apiKey) {
+  const { provider, apiKey, model, prompt, baseUrl } = params;
+  if (!apiKey && provider !== 'openai-compatible') {
     throw new Error(`No API key configured for ${provider}. Set one in Preferences > AI Thread Sidebar.`);
   }
 
@@ -74,7 +82,56 @@ export async function callLLM(params: CallParams): Promise<string> {
   if (provider === 'openrouter') {
     return callOpenRouter(apiKey, model, prompt);
   }
+  if (provider === 'openai-compatible') {
+    return callOpenAICompatible(apiKey, model, prompt, baseUrl || '');
+  }
   throw new Error(`Unknown provider: ${provider}`);
+}
+
+async function callOpenAICompatible(
+  apiKey: string,
+  model: string,
+  prompt: string,
+  baseUrl: string,
+): Promise<string> {
+  if (!baseUrl.trim()) {
+    throw new Error('No base URL configured for the OpenAI-compatible provider.');
+  }
+
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, '');
+  const endpoint = normalizedBaseUrl.endsWith('/chat/completions')
+    ? normalizedBaseUrl
+    : `${normalizedBaseUrl}/chat/completions`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+  } catch (err) {
+    throw new Error(`Network error contacting ${endpoint}: ${(err as Error).message}`);
+  }
+
+  if (!response.ok) {
+    const detail = await safeErrorDetail(response);
+    throw new Error(`OpenAI-compatible request failed (${response.status}): ${detail}`);
+  }
+
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content || typeof content !== 'string') {
+    throw new Error('OpenAI-compatible response did not contain any text.');
+  }
+  return content.trim();
 }
 
 async function callOpenAI(apiKey: string, model: string, prompt: string): Promise<string> {
